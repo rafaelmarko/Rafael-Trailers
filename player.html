@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Player de links do YouTube</title>
+<style>
+:root { --fundo:#0b0f17; --painel:#141b27; --texto:#e8edf5; --suave:#8a97ab; --acento:#3b82f6; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--fundo); color: var(--texto); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+#entrada { max-width: 760px; margin: 0 auto; padding: 48px 16px; }
+h1 { font-size: 26px; margin: 0 0 8px; }
+p { color: var(--suave); margin: 0 0 20px; line-height: 1.5; }
+.linha { display: flex; gap: 10px; }
+#link { flex: 1; min-width: 0; padding: 14px 16px; font-size: 17px; border-radius: 10px; border: 1px solid #2a3547; background: var(--painel); color: var(--texto); }
+#link:focus { outline: 3px solid var(--acento); outline-offset: 1px; }
+button { padding: 14px 20px; font-size: 17px; font-weight: 700; border: 0; border-radius: 10px; background: var(--acento); color: #fff; cursor: pointer; }
+button:focus { outline: 3px solid #fff; outline-offset: 2px; }
+#erro { color: #ff8080; min-height: 24px; margin-top: 12px; }
+#tela { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #000; display: none; }
+#tela.ativa { display: block; }
+#p, #tela iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+/* Cobre o vídeo: nenhum clique chega aos botões do YouTube. */
+#escudo { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; }
+#barra { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; padding: 18px 24px 22px; background: linear-gradient(0deg, rgba(0,0,0,.85), rgba(0,0,0,0)); transition: opacity .3s; }
+#barra.oculta { opacity: 0; pointer-events: none; }
+#tela.ativa:has(#barra.oculta) { cursor: none; }
+#progresso { height: 6px; background: rgba(255,255,255,.25); border-radius: 3px; overflow: hidden; margin-bottom: 14px; }
+#progresso div { height: 100%; width: 0; background: var(--acento); }
+.controles { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.controles button { background: rgba(255,255,255,.12); padding: 10px 16px; font-size: 18px; }
+.controles button:focus { background: var(--acento); }
+#tempo { margin-left: auto; font-variant-numeric: tabular-nums; color: #cfd8e6; }
+#aviso { position: absolute; top: 50%; left: 0; right: 0; text-align: center; z-index: 4; font-size: 20px; transform: translateY(-50%); pointer-events: none; }
+/* Dentro do Rafa IPTV (Assistir trailer): só o vídeo; os botões são os do app. */
+body.modo-app #entrada, body.modo-app #barra, body.modo-app #aviso { display: none !important; }
+body.modo-app #tela { display: block; }
+@media (max-width: 520px) { .linha { flex-direction: column; } }
+</style>
+</head>
+<body>
+<div id="entrada">
+    <h1>Player de links do YouTube</h1>
+    <p>Cole o link de um vídeo, Short ou trailer e aperte Assistir. O vídeo toca aqui mesmo, em tela cheia, sem abrir o YouTube.</p>
+    <div class="linha">
+        <input id="link" type="text" inputmode="url" placeholder="https://youtube.com/shorts/..." autocomplete="off">
+        <button id="assistir" type="button">Assistir</button>
+    </div>
+    <div id="erro"></div>
+    <p style="margin-top:28px;font-size:13px;opacity:.6">Versão 3 · controles somem em 3 s</p>
+</div>
+
+<div id="tela">
+    <div id="p"></div>
+    <div id="escudo"></div>
+    <div id="aviso">Carregando...</div>
+    <div id="barra">
+        <div id="progresso"><div></div></div>
+        <div class="controles">
+            <button type="button" data-acao="voltar" title="Voltar 10 segundos">⏪</button>
+            <button type="button" data-acao="tocar" id="btn-tocar" title="Pausar">❚❚</button>
+            <button type="button" data-acao="avancar" title="Avançar 10 segundos">⏩</button>
+            <button type="button" data-acao="inicio" title="Começar de novo">↺</button>
+            <button type="button" data-acao="sair" title="Sair">✕ Sair</button>
+            <span id="tempo">0:00 / 0:00</span>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    /* Aceita qualquer formato de link: watch?v=, youtu.be/, /shorts/,
+       /embed/, /live/ ou só o código de 11 caracteres. */
+    function idDoLink(valor) {
+        var t = String(valor || '').trim();
+        if (/^[\w-]{11}$/.test(t)) return t;
+        var padroes = [/[?&]v=([\w-]{11})/, /youtu\.be\/([\w-]{11})/i, /\/shorts\/([\w-]{11})/i,
+                       /\/embed\/([\w-]{11})/i, /\/live\/([\w-]{11})/i, /\/v\/([\w-]{11})/i];
+        for (var i = 0; i < padroes.length; i++) {
+            var m = t.match(padroes[i]);
+            if (m) return m[1];
+        }
+        return null;
+    }
+
+    var busca = {};
+    location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+        var p = kv.split('=');
+        if (p[0]) busca[p[0]] = decodeURIComponent(p.slice(1).join('=') || '');
+    });
+    /* Modo app: aberto pelo botão "Assistir trailer" do Rafa IPTV. O app
+       manda os comandos (play, pause, seek) e recebe o tempo por mensagens. */
+    var modoApp = busca.app === '1' || (function () { try { return window.self !== window.top; } catch (e) { return true; } })();
+    if (modoApp) document.body.classList.add('modo-app');
+    function avisarApp(o) {
+        if (!modoApp) return;
+        o.fonte = 'rafa-trailer';
+        try { window.parent.postMessage(JSON.stringify(o), '*'); } catch (e) {}
+    }
+
+    var tela = document.getElementById('tela');
+    var aviso = document.getElementById('aviso');
+    var barra = document.getElementById('barra');
+    var preenchido = document.querySelector('#progresso div');
+    var tempo = document.getElementById('tempo');
+    var btnTocar = document.getElementById('btn-tocar');
+    var campo = document.getElementById('link');
+    var erro = document.getElementById('erro');
+    var player = null, apiPronta = false, idPendente = null, relogio = null, esconder = null;
+
+    function bonito(s) {
+        s = Math.max(0, Math.floor(s || 0));
+        var m = Math.floor(s / 60), r = s % 60;
+        return m + ':' + (r < 10 ? '0' : '') + r;
+    }
+    /* Os controles aparecem e somem sozinhos em 3 segundos. */
+    function mostrarBarra() {
+        barra.classList.remove('oculta');
+        clearTimeout(esconder);
+        esconder = setTimeout(esconderBarra, 3000);
+    }
+    function esconderBarra() {
+        clearTimeout(esconder);
+        barra.classList.add('oculta');
+    }
+    function barraOculta() { return barra.classList.contains('oculta'); }
+    function atualizar() {
+        if (!player || !player.getCurrentTime) return;
+        var a = player.getCurrentTime() || 0, d = player.getDuration() || 0;
+        preenchido.style.width = (d > 0 ? Math.min(100, a / d * 100) : 0) + '%';
+        tempo.textContent = bonito(a) + ' / ' + bonito(d);
+        var tocando = player.getPlayerState() === 1;
+        btnTocar.textContent = tocando ? '❚❚' : '▶';
+        btnTocar.title = tocando ? 'Pausar' : 'Tocar';
+    }
+
+    function abrir(id) {
+        erro.textContent = '';
+        tela.classList.add('ativa');
+        aviso.textContent = 'Carregando...';
+        aviso.style.display = '';
+        mostrarBarra();
+        if (!modoApp) btnTocar.focus();
+        if (!apiPronta) { idPendente = id; return; }
+        if (player) { player.loadVideoById(id); return; }
+        player = new YT.Player('p', {
+            videoId: id, width: '100%', height: '100%',
+            playerVars: { autoplay: 1, controls: 0, rel: 0, modestbranding: 1, iv_load_policy: 3,
+                          disablekb: 1, fs: 0, playsinline: 1, hl: 'pt' },
+            events: {
+                onReady: function () {
+                    try { player.setVolume(100); player.unMute(); player.playVideo(); } catch (e) {}
+                    avisarApp({ evento: 'pronto' });
+                },
+                onStateChange: function (e) {
+                    avisarApp({ evento: 'estado', estado: e.data });
+                    if (e.data === 1) aviso.style.display = 'none';
+                    if (e.data === 0 && !modoApp) sair();
+                    atualizar();
+                },
+                onError: function (e) {
+                    var c = e.data;
+                    avisarApp({ evento: 'erro', codigo: c });
+                    aviso.style.display = '';
+                    aviso.textContent = (c === 101 || c === 150)
+                        ? 'O dono deste vídeo não permite que ele toque fora do YouTube.'
+                        : (c === 100 ? 'Vídeo não encontrado ou removido.' : 'Não foi possível tocar este vídeo (erro ' + c + ').');
+                }
+            }
+        });
+        setTimeout(function () {
+            if (!player || !player.getPlayerState) {
+                aviso.style.display = '';
+                aviso.textContent = 'O YouTube não respondeu. Verifique a internet e tente de novo.';
+            }
+        }, 12000);
+        clearInterval(relogio);
+        relogio = setInterval(function () {
+            atualizar();
+            if (modoApp && player && player.getCurrentTime) {
+                try { avisarApp({ evento: 'tempo', atual: player.getCurrentTime(), total: player.getDuration(), estado: player.getPlayerState() }); } catch (e) {}
+            }
+        }, 500);
+    }
+
+    function sair() {
+        if (player && player.stopVideo) { try { player.stopVideo(); } catch (e) {} }
+        tela.classList.remove('ativa');
+        campo.focus();
+    }
+
+    function acao(nome) {
+        mostrarBarra();
+        if (nome === 'sair') { sair(); return; }
+        if (!player || !player.getPlayerState) return;
+        var a = player.getCurrentTime() || 0;
+        if (nome === 'tocar') { if (player.getPlayerState() === 1) player.pauseVideo(); else player.playVideo(); }
+        else if (nome === 'voltar') player.seekTo(Math.max(0, a - 10), true);
+        else if (nome === 'avancar') player.seekTo(a + 10, true);
+        else if (nome === 'inicio') { player.seekTo(0, true); player.playVideo(); }
+        setTimeout(atualizar, 200);
+    }
+
+    /* Aberto como arquivo (file://, prévia do chat) o YouTube recusa com erro 153:
+       avisa em vez de mostrar uma tela de erro sem explicação. */
+    var semEndereco = !/^https?:$/.test(location.protocol);
+    function avisoSemEndereco() {
+        erro.innerHTML = 'Esta página foi aberta como arquivo (no computador, no celular ou na prévia do chat), e assim o YouTube não deixa tocar (erro 153). ' +
+            'Ela precisa estar publicada num endereço https, como o GitHub Pages. O passo a passo está no LEIA-ME.txt.';
+    }
+
+    function assistir() {
+        if (semEndereco) { avisoSemEndereco(); return; }
+        var id = idDoLink(campo.value);
+        if (!id) { erro.textContent = 'Link não reconhecido. Cole um link do YouTube.'; return; }
+        abrir(id);
+    }
+
+    document.getElementById('assistir').addEventListener('click', assistir);
+    campo.addEventListener('keydown', function (e) { if (e.keyCode === 13) assistir(); });
+    Array.prototype.forEach.call(document.querySelectorAll('.controles button'), function (b) {
+        b.addEventListener('click', function () { acao(b.getAttribute('data-acao')); });
+    });
+    // Toque na tela: se os controles estão escondidos, só mostra; senão pausa/toca.
+    document.getElementById('escudo').addEventListener('click', function () {
+        if (barraOculta()) { mostrarBarra(); return; }
+        acao('tocar');
+    });
+    tela.addEventListener('mousemove', function () { if (barraOculta()) mostrarBarra(); });
+
+    /* Teclado e controle remoto: setas trocam o botão, OK aperta,
+       VOLTAR/Esc sai, e as teclas de mídia funcionam direto. */
+    document.addEventListener('keydown', function (e) {
+        if (!tela.classList.contains('ativa')) return;
+        var k = e.keyCode;
+        var botoes = Array.prototype.slice.call(document.querySelectorAll('.controles button'));
+        var i = botoes.indexOf(document.activeElement);
+        // Seta pra baixo esconde os controles na hora.
+        if (k === 40) { e.preventDefault(); esconderBarra(); return; }
+        // Com os controles escondidos, setas/OK só fazem eles aparecerem.
+        if (barraOculta() && (k === 37 || k === 38 || k === 39 || k === 13)) {
+            e.preventDefault();
+            mostrarBarra();
+            if (i < 0 && botoes[1]) botoes[1].focus();
+            return;
+        }
+        mostrarBarra();
+        if (k === 27 || k === 8 || k === 10009) { e.preventDefault(); sair(); }
+        else if (k === 37) { e.preventDefault(); (botoes[i - 1] || botoes[0]).focus(); }
+        else if (k === 39) { e.preventDefault(); (botoes[i + 1] || botoes[botoes.length - 1]).focus(); }
+        else if (k === 32 || k === 10252 || k === 415 || k === 19) { e.preventDefault(); acao('tocar'); }
+        else if (k === 412) acao('voltar');
+        else if (k === 417) acao('avancar');
+        else if (k === 413) sair();
+    });
+
+    window.addEventListener('message', function (ev) {
+        var d = ev.data;
+        if (typeof d === 'string') { if (d.indexOf('rafa-trailer') === -1) return; try { d = JSON.parse(d); } catch (e) { return; } }
+        if (!d || d.alvo !== 'rafa-trailer' || !player || !player.playVideo) return;
+        try {
+            if (d.cmd === 'play') player.playVideo();
+            else if (d.cmd === 'pause') player.pauseVideo();
+            else if (d.cmd === 'seek') player.seekTo(Number(d.valor) || 0, true);
+        } catch (e) {}
+    });
+
+    window.onYouTubeIframeAPIReady = function () {
+        apiPronta = true;
+        if (idPendente) { var id = idPendente; idPendente = null; abrir(id); }
+    };
+    var s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    s.onerror = function () { erro.textContent = 'Sem conexão com o YouTube.'; avisarApp({ evento: 'erro', codigo: 'api' }); };
+    document.head.appendChild(s);
+
+    /* player.html?url=LINK (ou ?v=ID) já abre tocando. */
+    var inicial = idDoLink(busca.v || busca.url || '');
+    if (semEndereco) { avisoSemEndereco(); avisarApp({ evento: 'erro', codigo: 'sem-https' }); }
+    else if (inicial) { campo.value = busca.url || busca.v; abrir(inicial); }
+    else if (modoApp) avisarApp({ evento: 'erro', codigo: 'sem-id' });
+    else campo.focus();
+})();
+</script>
+</body>
+</html>
